@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Zap } from "lucide-react";
 
-const PASSWORD = "luminal2026";
+const PASSWORD = "M4afjtklehaf9035844$$#Q12";
 
 export function Login({ onLogin }: { onLogin: () => void }) {
   const [input, setInput] = useState("");
