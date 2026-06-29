@@ -1,6 +1,6 @@
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 const CLIENT_ID = process.env.REACT_APP_MS_CLIENT_ID || "";
-const REDIRECT_URI = "http://localhost:3000/auth-callback.html";
+const REDIRECT_URI = process.env.REACT_APP_MS_REDIRECT_URI || "http://localhost:3000/auth-callback.html";
 const SCOPES = "Mail.ReadWrite Mail.Send User.Read offline_access";
 
 export function signInInbox(loginHint?: string): Promise<string> {
