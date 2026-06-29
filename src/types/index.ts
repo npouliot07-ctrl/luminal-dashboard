@@ -18,6 +18,7 @@ export interface Lead {
   contactName: string;
   contactEmail: string;
   websiteUrl: string;
+  language: string;
   sourceFile: string;
   status: LeadStatus;
   suppressed: boolean;

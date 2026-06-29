@@ -2,15 +2,6 @@ import Papa from "papaparse";
 import type { Lead } from "../types";
 import { nanoid } from "./nanoid";
 
-/**
- * Parse a CSV file into Lead objects.
- *
- * Expected CSV columns (case-insensitive):
- *   email, name (or contact_name), company (or company_name), website (or url)
- *
- * Returns { leads, errors } where errors are rows that couldn't be parsed.
- */
-
 interface RawRow {
   [key: string]: string;
 }
@@ -41,7 +32,6 @@ export async function parseCsvToLeads(
         if (lines[0].startsWith(",")) lines[0] = lines[0].substring(1);
         return lines.join("\n");
       },
-      transformHeader: (header) => header.trim().replace(/^,/, ""),
       complete: (results) => {
         const leads: Lead[] = [];
         const errors: string[] = [];
@@ -51,6 +41,7 @@ export async function parseCsvToLeads(
           const name = normalizeKey(row, "name", "contact_name", "first_name");
           const company = normalizeKey(row, "company", "company_name", "organization");
           const website = normalizeKey(row, "website", "url", "domain", "site");
+          const language = normalizeKey(row, "language", "langue", "lang");
 
           if (!email || !email.includes("@")) {
             errors.push(`Row ${i + 2}: missing or invalid email`);
@@ -63,6 +54,7 @@ export async function parseCsvToLeads(
             contactName: name || company || "",
             contactEmail: email.toLowerCase().trim(),
             websiteUrl: website || "",
+            language: language || "English",
             sourceFile: file.name,
             status: "new",
             suppressed: false,
@@ -79,9 +71,6 @@ export async function parseCsvToLeads(
   });
 }
 
-/**
- * Deduplicate leads by email — keeps the first occurrence.
- */
 export function deduplicateLeads(
   incoming: Lead[],
   existing: Lead[]
