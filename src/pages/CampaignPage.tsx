@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect, useMemo } from "react";
 import {
   Settings, Zap, Send, ChevronDown, ChevronUp, Edit2, Check, X, Clock
 } from "lucide-react";
@@ -39,19 +39,43 @@ export function CampaignPage() {
   const [draftProgress, setDraftProgress] = useState({ done: 0, total: 0, failed: 0 });
   const [drafting, setDrafting] = useState(false);
 
-  const readyLeads = storage
-    .get<Lead>(storage.KEYS.leads)
-    .filter((l) => l.status === "new");
+  // ── Live data: leads + inboxes ───────────────────────────────────────────
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [inboxes, setInboxes] = useState<Inbox[]>([]);
+  const [dataLoading, setDataLoading] = useState(true);
 
-  const activeInboxes = storage
-    .get<Inbox>(storage.KEYS.inboxes)
-    .filter((i) => i.isActive && i.accessToken);
+  const loadLeads = useCallback(async () => {
+    setLeads(await storage.get<Lead>(storage.KEYS.leads));
+  }, []);
+  const loadInboxes = useCallback(async () => {
+    setInboxes(await storage.get<Inbox>(storage.KEYS.inboxes));
+  }, []);
+
+  // Initial load + live sync (e.g. your partner imports leads or connects an inbox mid-session)
+  useEffect(() => {
+    (async () => {
+      await Promise.all([loadLeads(), loadInboxes()]);
+      setDataLoading(false);
+    })();
+
+    const unsubLeads = storage.subscribe(storage.KEYS.leads, loadLeads);
+    const unsubInboxes = storage.subscribe(storage.KEYS.inboxes, loadInboxes);
+
+    return () => {
+      unsubLeads();
+      unsubInboxes();
+    };
+  }, [loadLeads, loadInboxes]);
+
+  const readyLeads = useMemo(() => leads.filter((l) => l.status === "new"), [leads]);
+  const activeInboxes = useMemo(() => inboxes.filter((i) => i.isActive && i.accessToken), [inboxes]);
+  const leadMap = useMemo(() => new Map(leads.map((l) => [l.id, l])), [leads]);
 
   const selectedCount = Math.min(endRow, readyLeads.length) - Math.max(startRow - 1, 0);
 
   const handleGenerate = async () => {
     const selected = readyLeads.slice(startRow - 1, endRow);
-    const { clean } = filterSuppressedLeads(selected);
+    const { clean } = await filterSuppressedLeads(selected);
     if (clean.length === 0) return;
 
     const newCampaign: Campaign = {
@@ -64,14 +88,14 @@ export function CampaignPage() {
       createdAt: new Date().toISOString(),
     };
 
-    storage.upsert(storage.KEYS.campaigns, newCampaign);
+    await storage.upsert(storage.KEYS.campaigns, newCampaign);
     setCampaign(newCampaign);
     setGenerating(true);
     setGenProgress({ done: 0, total: clean.length });
 
-    for (const lead of clean) {
-      storage.upsert(storage.KEYS.leads, { ...lead, status: "generating" });
-    }
+    await Promise.all(
+      clean.map((lead) => storage.upsert(storage.KEYS.leads, { ...lead, status: "generating" }))
+    );
 
     const emails = await generateEmailBatch(
       clean,
@@ -79,16 +103,17 @@ export function CampaignPage() {
       generator
     );
 
-    for (const email of emails) {
-      storage.upsert(storage.KEYS.emails, email);
-    }
+    await Promise.all(emails.map((email) => storage.upsert(storage.KEYS.emails, email)));
 
     setGeneratedEmails(emails);
     setGenerating(false);
     setStep("preview");
-    logAudit("emails_generated", `${emails.length} emails generated`, {
+    await logAudit("emails_generated", `${emails.length} emails generated`, {
       campaignId: newCampaign.id,
     });
+
+    // Refresh local lead state so leadMap/readyLeads reflect the new "generating" status
+    await loadLeads();
   };
 
 
@@ -98,42 +123,38 @@ export function CampaignPage() {
     setEditBody(email.body.replace(/<p>/g, "").replace(/<\/p>/g, "\n\n").replace(/<br\/>/g, "\n").trim());
   };
 
-  const saveEdit = (emailId: string) => {
-    const updated = generatedEmails.map((e) => {
-      if (e.id !== emailId) return e;
-      const newEmail = {
-        ...e,
-        subjectLine: editSubject,
-        body: editBody
-          .split(/\n\n+/)
-          .map((p) => `<p>${p.replace(/\n/g, "<br/>").trim()}</p>`)
-          .join("\n"),
-        editedAt: new Date().toISOString(),
-        approved: true,
-      };
-      storage.upsert(storage.KEYS.emails, newEmail);
-      return newEmail;
-    });
-    setGeneratedEmails(updated);
+  const saveEdit = async (emailId: string) => {
+    const target = generatedEmails.find((e) => e.id === emailId);
+    if (!target) return;
+
+    const newEmail: GeneratedEmail = {
+      ...target,
+      subjectLine: editSubject,
+      body: editBody
+        .split(/\n\n+/)
+        .map((p) => `<p>${p.replace(/\n/g, "<br/>").trim()}</p>`)
+        .join("\n"),
+      editedAt: new Date().toISOString(),
+      approved: true,
+    };
+
+    await storage.upsert(storage.KEYS.emails, newEmail);
+    setGeneratedEmails((prev) => prev.map((e) => (e.id === emailId ? newEmail : e)));
     setEditingId(null);
   };
 
-  const toggleApprove = (emailId: string) => {
-    const updated = generatedEmails.map((e) => {
-      if (e.id !== emailId) return e;
-      const toggled = { ...e, approved: !e.approved };
-      storage.upsert(storage.KEYS.emails, toggled);
-      return toggled;
-    });
-    setGeneratedEmails(updated);
+  const toggleApprove = async (emailId: string) => {
+    const target = generatedEmails.find((e) => e.id === emailId);
+    if (!target) return;
+
+    const toggled: GeneratedEmail = { ...target, approved: !target.approved };
+    await storage.upsert(storage.KEYS.emails, toggled);
+    setGeneratedEmails((prev) => prev.map((e) => (e.id === emailId ? toggled : e)));
   };
 
-  const approveAll = () => {
-    const updated = generatedEmails.map((e) => {
-      const approved = { ...e, approved: true };
-      storage.upsert(storage.KEYS.emails, approved);
-      return approved;
-    });
+  const approveAll = async () => {
+    const updated = generatedEmails.map((e) => ({ ...e, approved: true }));
+    await Promise.all(updated.map((e) => storage.upsert(storage.KEYS.emails, e)));
     setGeneratedEmails(updated);
   };
 
@@ -147,35 +168,36 @@ export function CampaignPage() {
     setDrafting(true);
     setStep("drafting");
 
-    const leads = storage.get<Lead>(storage.KEYS.leads);
-    const inboxes = storage.get<Inbox>(storage.KEYS.inboxes);
+    // Fetch a fresh snapshot right before drafting — leads/inboxes may have
+    // changed since this page loaded (e.g. your partner connected an inbox).
+    const currentLeads = await storage.get<Lead>(storage.KEYS.leads);
+    const currentInboxes = await storage.get<Inbox>(storage.KEYS.inboxes);
+    const currentLeadMap = new Map(currentLeads.map((l) => [l.id, l]));
 
-    const leadMap = new Map(leads.map((l) => [l.id, l]));
     const approvedLeads = approved
-      .map((e) => leadMap.get(e.leadId))
+      .map((e) => currentLeadMap.get(e.leadId))
       .filter(Boolean) as Lead[];
 
-    const distribution = distributeLeads(approvedLeads, inboxes);
+    const distribution = distributeLeads(approvedLeads, currentInboxes);
     const emailIdMap = new Map<string, string>(approved.map((e) => [e.leadId, e.id]));
     const queueItems = buildQueueItems(campaign, emailIdMap, distribution);
 
-    for (const item of queueItems) {
-      storage.upsert(storage.KEYS.queue, item);
-    }
+    await Promise.all(queueItems.map((item) => storage.upsert(storage.KEYS.queue, item)));
 
     setDraftProgress({ done: 0, total: queueItems.length, failed: 0 });
 
     let done = 0;
     let failed = 0;
 
+    // Sequential on purpose — avoids hammering the Graph API rate limits
     for (const item of queueItems) {
-      const inbox = inboxes.find((i) => i.id === item.inboxId);
+      const inbox = currentInboxes.find((i) => i.id === item.inboxId);
       const email = approved.find((e) => e.id === item.emailId);
-      const lead = leadMap.get(item.leadId);
+      const lead = currentLeadMap.get(item.leadId);
 
       if (!inbox?.accessToken || !email || !lead) {
         failed++;
-        storage.upsert(storage.KEYS.queue, { ...item, status: "failed" });
+        await storage.upsert(storage.KEYS.queue, { ...item, status: "failed" });
         setDraftProgress((p) => ({ ...p, done: ++done, failed }));
         continue;
       }
@@ -191,30 +213,37 @@ export function CampaignPage() {
           }
         );
 
-        storage.upsert(storage.KEYS.queue, { ...item, draftId, status: "drafted" });
-        storage.upsert(storage.KEYS.leads, { ...lead, status: "drafted" });
-        storage.upsert(storage.KEYS.inboxes, {
+        await storage.upsert(storage.KEYS.queue, { ...item, draftId, status: "drafted" });
+        await storage.upsert(storage.KEYS.leads, { ...lead, status: "drafted" });
+        await storage.upsert(storage.KEYS.inboxes, {
           ...inbox,
           draftsToday: inbox.draftsToday + 1,
         });
 
-        logAudit("draft_created", `Draft created in ${inbox.emailAddress}`, {
+        await logAudit("draft_created", `Draft created in ${inbox.emailAddress}`, {
           campaignId: campaign.id,
           leadId: lead.id,
           inboxId: inbox.id,
         });
       } catch (err) {
         failed++;
-        storage.upsert(storage.KEYS.queue, { ...item, status: "failed" });
+        await storage.upsert(storage.KEYS.queue, { ...item, status: "failed" });
         console.error("Draft creation failed:", err);
       }
 
       setDraftProgress((p) => ({ ...p, done: ++done, failed }));
     }
 
-    storage.upsert(storage.KEYS.campaigns, { ...campaign, status: "active", launchedAt: new Date().toISOString() });
+    await storage.upsert(storage.KEYS.campaigns, {
+      ...campaign,
+      status: "active",
+      launchedAt: new Date().toISOString(),
+    });
     setDrafting(false);
     setStep("done");
+
+    // Refresh local state to reflect drafted leads / updated draftsToday counts
+    await Promise.all([loadLeads(), loadInboxes()]);
   };
 
   const approvedCount = generatedEmails.filter((e) => e.approved).length;
@@ -240,6 +269,9 @@ export function CampaignPage() {
         <div className="card mt-6" style={{ maxWidth: 560 }}>
           <h2 style={{ marginBottom: "var(--sp-5)" }}>{tr("campaignSettings")}</h2>
 
+          {dataLoading ? (
+            <p className="text-muted">{lang === "fr" ? "Chargement…" : "Loading…"}</p>
+          ) : (
           <div className="flex-col gap-4">
             <div className="field">
               <label>{tr("campaignName")}</label>
@@ -343,6 +375,7 @@ export function CampaignPage() {
               </div>
             )}
           </div>
+          )}
         </div>
       )}
 
@@ -367,9 +400,7 @@ export function CampaignPage() {
 
           <div className="flex-col gap-3">
             {generatedEmails.map((email) => {
-              const lead = storage
-                .get<Lead>(storage.KEYS.leads)
-                .find((l) => l.id === email.leadId);
+              const lead = leadMap.get(email.leadId);
               const isExpanded = expandedId === email.id;
               const isEditing = editingId === email.id;
 

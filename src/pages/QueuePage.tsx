@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { Play, Pause, Send, RefreshCw, Clock } from "lucide-react";
 import type { QueueItem, Lead, Inbox, Campaign } from "../types";
 import { storage } from "../services/storage";
@@ -11,22 +11,51 @@ export function QueuePage() {
   const { lang } = useLang();
   const tr = (key: string) => translate(key, lang);
 
-  const [queue, setQueue] = useState<QueueItem[]>(() =>
-    storage.get<QueueItem>(storage.KEYS.queue)
-  );
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [inboxes, setInboxes] = useState<Inbox[]>([]);
+  const [campaigns, setCampaigns] = useState<Campaign[]>([]);
+  const [loading, setLoading] = useState(true);
   const [autoMode, setAutoMode] = useState(false);
   const [sending, setSending] = useState<string | null>(null);
   const schedulerRef = useRef<NodeJS.Timeout | null>(null);
 
-  const leads = storage.get<Lead>(storage.KEYS.leads);
-  const inboxes = storage.get<Inbox>(storage.KEYS.inboxes);
-  const campaigns = storage.get<Campaign>(storage.KEYS.campaigns);
+  const refreshQueue = useCallback(async () => {
+    setQueue(await storage.get<QueueItem>(storage.KEYS.queue));
+  }, []);
+  const refreshLeads = useCallback(async () => {
+    setLeads(await storage.get<Lead>(storage.KEYS.leads));
+  }, []);
+  const refreshInboxes = useCallback(async () => {
+    setInboxes(await storage.get<Inbox>(storage.KEYS.inboxes));
+  }, []);
+  const refreshCampaigns = useCallback(async () => {
+    setCampaigns(await storage.get<Campaign>(storage.KEYS.campaigns));
+  }, []);
 
-  const leadMap = new Map(leads.map((l) => [l.id, l]));
-  const inboxMap = new Map(inboxes.map((i) => [i.id, i]));
-  const campaignMap = new Map(campaigns.map((c) => [c.id, c]));
+  // Initial load + live sync so both users see the queue update together
+  useEffect(() => {
+    (async () => {
+      await Promise.all([refreshQueue(), refreshLeads(), refreshInboxes(), refreshCampaigns()]);
+      setLoading(false);
+    })();
 
-  const refresh = () => setQueue(storage.get<QueueItem>(storage.KEYS.queue));
+    const unsubQueue = storage.subscribe(storage.KEYS.queue, refreshQueue);
+    const unsubLeads = storage.subscribe(storage.KEYS.leads, refreshLeads);
+    const unsubInboxes = storage.subscribe(storage.KEYS.inboxes, refreshInboxes);
+    const unsubCampaigns = storage.subscribe(storage.KEYS.campaigns, refreshCampaigns);
+
+    return () => {
+      unsubQueue();
+      unsubLeads();
+      unsubInboxes();
+      unsubCampaigns();
+    };
+  }, [refreshQueue, refreshLeads, refreshInboxes, refreshCampaigns]);
+
+  const leadMap = useMemo(() => new Map(leads.map((l) => [l.id, l])), [leads]);
+  const inboxMap = useMemo(() => new Map(inboxes.map((i) => [i.id, i])), [inboxes]);
+  const campaignMap = useMemo(() => new Map(campaigns.map((c) => [c.id, c])), [campaigns]);
 
   const sendItem = async (item: QueueItem) => {
     const inbox = inboxMap.get(item.inboxId);
@@ -41,22 +70,22 @@ export function QueuePage() {
         status: "sent",
         actualSentAt: new Date().toISOString(),
       };
-      storage.upsert(storage.KEYS.queue, updated);
+      await storage.upsert(storage.KEYS.queue, updated);
 
       const lead = leadMap.get(item.leadId);
-      if (lead) storage.upsert(storage.KEYS.leads, { ...lead, status: "sent" });
+      if (lead) await storage.upsert(storage.KEYS.leads, { ...lead, status: "sent" });
 
-      logAudit("email_sent", undefined, {
+      await logAudit("email_sent", undefined, {
         campaignId: item.campaignId,
         leadId: item.leadId,
         inboxId: item.inboxId,
       });
     } catch (err) {
-      storage.upsert(storage.KEYS.queue, { ...item, status: "failed" });
+      await storage.upsert(storage.KEYS.queue, { ...item, status: "failed" });
       console.error("Send failed:", err);
     }
     setSending(null);
-    refresh();
+    await refreshQueue();
   };
 
   useEffect(() => {
@@ -65,9 +94,9 @@ export function QueuePage() {
       return;
     }
 
-    const tick = () => {
+    const tick = async () => {
       const now = new Date();
-      const q = storage.get<QueueItem>(storage.KEYS.queue);
+      const q = await storage.get<QueueItem>(storage.KEYS.queue);
       const due = q.find(
         (item) =>
           item.status === "drafted" &&
@@ -83,6 +112,7 @@ export function QueuePage() {
     return () => {
       if (schedulerRef.current) clearInterval(schedulerRef.current);
     };
+
   }, [autoMode]);
 
   const [filterStatus, setFilterStatus] = useState("all");
@@ -111,7 +141,7 @@ export function QueuePage() {
           <p>{tr("queueDesc")}</p>
         </div>
         <div className="flex gap-3 items-center">
-          <button className="btn btn-ghost btn-sm" onClick={refresh}>
+          <button className="btn btn-ghost btn-sm" onClick={refreshQueue}>
             <RefreshCw size={13} /> {tr("refresh")}
           </button>
           <button
@@ -172,7 +202,11 @@ export function QueuePage() {
         </select>
       </div>
 
-      {filtered.length > 0 ? (
+      {loading ? (
+        <div className="empty-state">
+          <p className="text-muted">{lang === "fr" ? "Chargement…" : "Loading…"}</p>
+        </div>
+      ) : filtered.length > 0 ? (
         <div className="card">
           <div className="table-wrap">
             <table>

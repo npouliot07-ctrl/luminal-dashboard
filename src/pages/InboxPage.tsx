@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { Plus, ExternalLink, Pause, Play, Trash2, RefreshCw } from "lucide-react";
 import type { Inbox } from "../types";
 import { storage } from "../services/storage";
@@ -12,19 +12,30 @@ export function InboxPage() {
   const { lang } = useLang();
   const tr = (key: string) => translate(key, lang);
 
-  const [inboxes, setInboxes] = useState<Inbox[]>(() =>
-    storage.get<Inbox>(storage.KEYS.inboxes)
-  );
+  const [inboxes, setInboxes] = useState<Inbox[]>([]);
+  const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
   const [newEmail, setNewEmail] = useState("");
   const [newName, setNewName] = useState("");
 
-  const save = (updated: Inbox[]) => {
-    storage.set(storage.KEYS.inboxes, updated);
+  const loadInboxes = useCallback(async () => {
+    setInboxes(await storage.get<Inbox>(storage.KEYS.inboxes));
+    setLoading(false);
+  }, []);
+
+  // Initial load + live sync when your partner adds/connects/removes an inbox
+  useEffect(() => {
+    loadInboxes();
+    const unsubscribe = storage.subscribe(storage.KEYS.inboxes, loadInboxes);
+    return unsubscribe;
+  }, [loadInboxes]);
+
+  const save = async (updated: Inbox[]) => {
+    await storage.set(storage.KEYS.inboxes, updated);
     setInboxes(updated);
   };
 
-  const addInbox = () => {
+  const addInbox = async () => {
     if (!newEmail.includes("@")) return;
     const inbox: Inbox = {
       id: nanoid(),
@@ -38,35 +49,35 @@ export function InboxPage() {
       addedAt: new Date().toISOString(),
       lastRampedAt: new Date().toISOString(),
     };
-    save([...inboxes, inbox]);
+    await save([...inboxes, inbox]);
     setNewEmail("");
     setNewName("");
     setShowAddForm(false);
   };
 
-  const toggleActive = (id: string) => {
-    save(inboxes.map((i) => (i.id === id ? { ...i, isActive: !i.isActive } : i)));
+  const toggleActive = async (id: string) => {
+    await save(inboxes.map((i) => (i.id === id ? { ...i, isActive: !i.isActive } : i)));
   };
 
-  const updateField = (id: string, field: keyof Inbox, value: number) => {
-    save(inboxes.map((i) => (i.id === id ? { ...i, [field]: value } : i)));
+  const updateField = async (id: string, field: keyof Inbox, value: number) => {
+    await save(inboxes.map((i) => (i.id === id ? { ...i, [field]: value } : i)));
   };
 
-  const removeInbox = (id: string) => {
+  const removeInbox = async (id: string) => {
     if (window.confirm(lang === "fr" ? "Supprimer cette boîte ?" : "Remove this inbox?")) {
-      save(inboxes.filter((i) => i.id !== id));
+      await save(inboxes.filter((i) => i.id !== id));
     }
   };
 
   const connectOAuth = async (inbox: Inbox) => {
     try {
       const accessToken = await signInInbox(inbox.emailAddress);
-      storage.upsert(storage.KEYS.inboxes, {
+      await storage.upsert(storage.KEYS.inboxes, {
         ...inbox,
         accessToken,
         isActive: true,
       });
-      save(storage.get<Inbox>(storage.KEYS.inboxes));
+      setInboxes(await storage.get<Inbox>(storage.KEYS.inboxes));
       alert(lang === "fr" ? `Connecté !` : `Connected!`);
     } catch (err) {
       console.error("Login failed:", err);
@@ -125,7 +136,11 @@ export function InboxPage() {
         </div>
       )}
 
-      {inboxes.length > 0 ? (
+      {loading ? (
+        <div className="empty-state mt-6">
+          <p className="text-muted">{lang === "fr" ? "Chargement…" : "Loading…"}</p>
+        </div>
+      ) : inboxes.length > 0 ? (
         <div className="card mt-6">
           <div className="table-wrap">
             <table>

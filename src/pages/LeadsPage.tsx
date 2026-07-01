@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { Upload, AlertTriangle, CheckCircle, Trash2, Users } from "lucide-react";
 import type { Lead } from "../types";
 import { storage } from "../services/storage";
@@ -7,13 +7,21 @@ import { filterSuppressedLeads } from "../services/compliance";
 import { useLang } from "../utils/LangContext";
 import { translate } from "../utils/i18n";
 
+// Database write-order (updated_at) doesn't match CSV row order once you're
+// bulk-importing — sort by each lead's own createdAt instead, which is
+// assigned sequentially as csvParser walks the file top to bottom.
+function sortByCreatedAt(leads: Lead[]): Lead[] {
+  return [...leads].sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+}
+
 export function LeadsPage() {
   const { lang } = useLang();
   const tr = (key: string) => translate(key, lang);
 
-  const [leads, setLeads] = useState<Lead[]>(() =>
-    storage.get<Lead>(storage.KEYS.leads)
-  );
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [loading, setLoading] = useState(true);
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<{
     added: number;
@@ -22,16 +30,29 @@ export function LeadsPage() {
     errors: string[];
   } | null>(null);
 
+  const loadLeads = useCallback(async () => {
+    const data = await storage.get<Lead>(storage.KEYS.leads);
+    setLeads(sortByCreatedAt(data));
+    setLoading(false);
+  }, []);
+
+  // Initial load + live sync when your partner adds/edits leads
+  useEffect(() => {
+    loadLeads();
+    const unsubscribe = storage.subscribe(storage.KEYS.leads, loadLeads);
+    return unsubscribe;
+  }, [loadLeads]);
+
   const handleFile = useCallback(async (file: File) => {
     setImporting(true);
     setImportResult(null);
     const { leads: parsed, errors } = await parseCsvToLeads(file);
-    const existing = storage.get<Lead>(storage.KEYS.leads);
+    const existing = await storage.get<Lead>(storage.KEYS.leads);
     const { unique, duplicates } = deduplicateLeads(parsed, existing);
-    const { clean, suppressed } = filterSuppressedLeads(unique);
+    const { clean, suppressed } = await filterSuppressedLeads(unique);
     const allLeads = [...existing, ...clean, ...suppressed];
-    storage.set(storage.KEYS.leads, allLeads);
-    setLeads(allLeads);
+    await storage.set(storage.KEYS.leads, allLeads);
+    setLeads(sortByCreatedAt(allLeads));
     setImportResult({ added: clean.length, duplicates, suppressed: suppressed.length, errors });
     setImporting(false);
   }, []);
@@ -42,9 +63,9 @@ export function LeadsPage() {
     if (file?.name.endsWith(".csv")) handleFile(file);
   }, [handleFile]);
 
-  const handleClearAll = () => {
+  const handleClearAll = async () => {
     if (window.confirm(lang === "fr" ? "Supprimer tous les prospects ?" : "Remove all leads?")) {
-      storage.set(storage.KEYS.leads, []);
+      await storage.set(storage.KEYS.leads, []);
       setLeads([]);
       setImportResult(null);
     }
@@ -136,56 +157,64 @@ export function LeadsPage() {
         </div>
       )}
 
-      {leads.length > 0 && (
-        <div className="card mt-6">
-          <div className="card-header">
-            <h2>{leads.length} {tr("leadsTitle").toLowerCase()}</h2>
-            <button className="btn btn-danger btn-sm" onClick={handleClearAll}>
-              <Trash2 size={13} />
-              {tr("clearAll")}
-            </button>
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>{tr("company")}</th>
-                  <th>{tr("email")}</th>
-                  <th>Website</th>
-                  <th>Source</th>
-                  <th>{tr("status")}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {leads.slice(0, 200).map((lead) => (
-                  <tr key={lead.id}>
-                    <td style={{ fontWeight: 500 }}>{lead.companyName}</td>
-                    <td className="mono">{lead.contactEmail}</td>
-                    <td className="text-muted text-sm">{lead.websiteUrl || "—"}</td>
-                    <td className="text-muted text-sm">{lead.sourceFile}</td>
-                    <td>
-                      <span className={`badge badge-${lead.status}`}>
-                        {lead.status}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {leads.length > 200 && (
-              <p className="text-muted text-sm" style={{ padding: "var(--sp-3)", textAlign: "center" }}>
-                {lang === "fr" ? `Affichage de 200 sur ${leads.length} prospects` : `Showing 200 of ${leads.length} leads`}
-              </p>
-            )}
-          </div>
-        </div>
-      )}
-
-      {leads.length === 0 && !importResult && (
+      {loading ? (
         <div className="empty-state mt-6">
-          <Users size={40} />
-          <p>{tr("noLeads")}</p>
+          <p className="text-muted">{lang === "fr" ? "Chargement…" : "Loading…"}</p>
         </div>
+      ) : (
+        <>
+          {leads.length > 0 && (
+            <div className="card mt-6">
+              <div className="card-header">
+                <h2>{leads.length} {tr("leadsTitle").toLowerCase()}</h2>
+                <button className="btn btn-danger btn-sm" onClick={handleClearAll}>
+                  <Trash2 size={13} />
+                  {tr("clearAll")}
+                </button>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>{tr("company")}</th>
+                      <th>{tr("email")}</th>
+                      <th>Website</th>
+                      <th>Source</th>
+                      <th>{tr("status")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {leads.slice(0, 200).map((lead) => (
+                      <tr key={lead.id}>
+                        <td style={{ fontWeight: 500 }}>{lead.companyName}</td>
+                        <td className="mono">{lead.contactEmail}</td>
+                        <td className="text-muted text-sm">{lead.websiteUrl || "—"}</td>
+                        <td className="text-muted text-sm">{lead.sourceFile}</td>
+                        <td>
+                          <span className={`badge badge-${lead.status}`}>
+                            {lead.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {leads.length > 200 && (
+                  <p className="text-muted text-sm" style={{ padding: "var(--sp-3)", textAlign: "center" }}>
+                    {lang === "fr" ? `Affichage de 200 sur ${leads.length} prospects` : `Showing 200 of ${leads.length} leads`}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {leads.length === 0 && !importResult && (
+            <div className="empty-state mt-6">
+              <Users size={40} />
+              <p>{tr("noLeads")}</p>
+            </div>
+          )}
+        </>
       )}
 
       <style>{`
@@ -206,5 +235,3 @@ export function LeadsPage() {
     </div>
   );
 }
-
-

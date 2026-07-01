@@ -8,6 +8,11 @@ import { nanoid } from "../utils/nanoid";
  * 1. Filters inboxes to those with available slots today
  * 2. Distributes leads proportionally by available capacity
  * 3. Builds QueueItems with scheduled send times
+ *
+ * NOTE: distributeLeads/buildQueueItems/getAvailableSlots are pure
+ * functions with no storage calls, so they're unchanged by the Supabase
+ * migration. (The inbox-distribution bug is a separate, already-identified
+ * issue — see the note in CampaignPage.tsx / the handoff conversation.)
  */
 
 // ─── Available slots per inbox ────────────────────────────────────────────────
@@ -96,17 +101,22 @@ export function buildQueueItems(
 
 // ─── Daily ramp — call once per day at midnight ───────────────────────────────
 
-export function applyDailyRamp(): void {
-  const inboxes = storage.get<Inbox>(storage.KEYS.inboxes);
+export async function applyDailyRamp(): Promise<void> {
+  const inboxes = await storage.get<Inbox>(storage.KEYS.inboxes);
   const today = new Date().toDateString();
 
-  for (const inbox of inboxes) {
-    const lastRamped = new Date(inbox.lastRampedAt).toDateString();
-    if (lastRamped !== today) {
-      inbox.dailyLimit = inbox.dailyLimit + inbox.rampRate;
-      inbox.draftsToday = 0;
-      inbox.lastRampedAt = new Date().toISOString();
-      storage.upsert(storage.KEYS.inboxes, inbox);
-    }
-  }
+  const toRamp = inboxes.filter(
+    (inbox) => new Date(inbox.lastRampedAt).toDateString() !== today
+  );
+
+  await Promise.all(
+    toRamp.map((inbox) =>
+      storage.upsert(storage.KEYS.inboxes, {
+        ...inbox,
+        dailyLimit: inbox.dailyLimit + inbox.rampRate,
+        draftsToday: 0,
+        lastRampedAt: new Date().toISOString(),
+      })
+    )
+  );
 }
