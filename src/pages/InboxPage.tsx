@@ -71,10 +71,13 @@ export function InboxPage() {
 
   const connectOAuth = async (inbox: Inbox) => {
     try {
-      const accessToken = await signInInbox(inbox.emailAddress);
+      const { accessToken, refreshToken, expiresIn } = await signInInbox(inbox.emailAddress);
+      const tokenExpiresAt = new Date(Date.now() + expiresIn * 1000).toISOString();
       await storage.upsert(storage.KEYS.inboxes, {
         ...inbox,
         accessToken,
+        refreshToken,
+        tokenExpiresAt,
         isActive: true,
       });
       setInboxes(await storage.get<Inbox>(storage.KEYS.inboxes));
@@ -166,7 +169,7 @@ export function InboxPage() {
                       <span className={`badge ${inbox.isActive ? "badge-active" : "badge-paused"}`}>
                         {inbox.isActive ? tr("active") : tr("inactive")}
                       </span>
-                      {!inbox.accessToken && (
+                      {!inbox.refreshToken && (
                         <span className="badge badge-failed" style={{ marginLeft: 6 }}>
                           {tr("notConnected")}
                         </span>

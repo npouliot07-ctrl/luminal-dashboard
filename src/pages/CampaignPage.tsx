@@ -7,12 +7,22 @@ import { storage } from "../services/storage";
 import { generateEmailBatch } from "../services/emailGenerator";
 import { distributeLeads, buildQueueItems } from "../services/routingEngine";
 import { filterSuppressedLeads, logAudit } from "../services/compliance";
-import { createOutlookDraft } from "../services/graphApi";
+import { createOutlookDraft, getValidAccessToken } from "../services/graphApi";
 import { nanoid } from "../utils/nanoid";
 import { useLang } from "../utils/LangContext";
 import { translate } from "../utils/i18n";
 
 type Step = "configure" | "preview" | "drafting" | "done";
+
+// Database write-order doesn't match CSV row order once you're bulk-importing —
+// sort by each lead's own createdAt instead (assigned sequentially as
+// csvParser walks the file), same as LeadsPage, so "row 1 to 3" here means
+// the same thing as "row 1 to 3" on the Leads page.
+function sortByCreatedAt(leads: Lead[]): Lead[] {
+  return [...leads].sort(
+    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+  );
+}
 
 export function CampaignPage() {
   const { lang } = useLang();
@@ -45,7 +55,7 @@ export function CampaignPage() {
   const [dataLoading, setDataLoading] = useState(true);
 
   const loadLeads = useCallback(async () => {
-    setLeads(await storage.get<Lead>(storage.KEYS.leads));
+    setLeads(sortByCreatedAt(await storage.get<Lead>(storage.KEYS.leads)));
   }, []);
   const loadInboxes = useCallback(async () => {
     setInboxes(await storage.get<Inbox>(storage.KEYS.inboxes));
@@ -68,14 +78,53 @@ export function CampaignPage() {
   }, [loadLeads, loadInboxes]);
 
   const readyLeads = useMemo(() => leads.filter((l) => l.status === "new"), [leads]);
-  const activeInboxes = useMemo(() => inboxes.filter((i) => i.isActive && i.accessToken), [inboxes]);
+  // "Active" here means eligible for planning purposes — connection status
+  // is checked separately at actual draft-creation time, not here. This
+  // lets you plan/generate a campaign across inboxes you haven't connected
+  // yet and connect them incrementally afterward.
+  const activeInboxes = useMemo(() => inboxes.filter((i) => i.isActive), [inboxes]);
+  const connectedInboxCount = useMemo(() => inboxes.filter((i) => i.isActive && i.refreshToken).length, [inboxes]);
   const leadMap = useMemo(() => new Map(leads.map((l) => [l.id, l])), [leads]);
 
   const selectedCount = Math.min(endRow, readyLeads.length) - Math.max(startRow - 1, 0);
 
   const handleGenerate = async () => {
-    const selected = readyLeads.slice(startRow - 1, endRow);
-    const { clean } = await filterSuppressedLeads(selected);
+    // Fresh, correctly-ordered snapshot right before generating — avoids
+    // acting on stale state if your partner just generated on overlapping
+    // rows a moment ago.
+    const freshLeads = sortByCreatedAt(await storage.get<Lead>(storage.KEYS.leads));
+    const freshReady = freshLeads.filter((l) => l.status === "new");
+    const selected = freshReady.slice(startRow - 1, endRow);
+
+    if (selected.length === 0) {
+      alert(lang === "fr" ? "Aucun prospect dans cette plage." : "No leads in that row range.");
+      return;
+    }
+
+    // Duplicate-generation check: a "new"-status lead should never already
+    // have a generated email, but this catches races — e.g. you and your
+    // partner both hitting Generate on overlapping rows within moments of
+    // each other — before it wastes an AI call and creates a duplicate draft.
+    const existingEmails = await storage.get<GeneratedEmail>(storage.KEYS.emails);
+    const alreadyGeneratedIds = new Set(existingEmails.map((e) => e.leadId));
+    const duplicates = selected.filter((l) => alreadyGeneratedIds.has(l.id));
+
+    let toGenerate = selected;
+    if (duplicates.length > 0) {
+      const names = duplicates.slice(0, 10).map((l) => l.companyName || l.contactEmail).join(", ");
+      const more = duplicates.length > 10 ? ` (+${duplicates.length - 10} more)` : "";
+      const proceed = window.confirm(
+        lang === "fr"
+          ? `${duplicates.length} prospect(s) sélectionné(s) ont déjà un email généré : ${names}${more}. Les ignorer et continuer avec les autres ?`
+          : `${duplicates.length} selected lead(s) already have a generated email on file: ${names}${more}. Skip them and continue with the rest?`
+      );
+      if (!proceed) return;
+      toGenerate = selected.filter((l) => !alreadyGeneratedIds.has(l.id));
+    }
+
+    if (toGenerate.length === 0) return;
+
+    const { clean } = await filterSuppressedLeads(toGenerate);
     if (clean.length === 0) return;
 
     const newCampaign: Campaign = {
@@ -178,6 +227,11 @@ export function CampaignPage() {
       .map((e) => currentLeadMap.get(e.leadId))
       .filter(Boolean) as Lead[];
 
+    // Distribute the plan across ALL active inboxes, connected or not — this
+    // is what lets you set up 6 inboxes, generate/draft now, and connect them
+    // one at a time afterward. Each item still only succeeds at the loop
+    // below if its assigned inbox has a valid accessToken at that moment;
+    // otherwise it's marked "failed" and can be retried once connected.
     const distribution = distributeLeads(approvedLeads, currentInboxes);
     const emailIdMap = new Map<string, string>(approved.map((e) => [e.leadId, e.id]));
     const queueItems = buildQueueItems(campaign, emailIdMap, distribution);
@@ -195,7 +249,7 @@ export function CampaignPage() {
       const email = approved.find((e) => e.id === item.emailId);
       const lead = currentLeadMap.get(item.leadId);
 
-      if (!inbox?.accessToken || !email || !lead) {
+      if (!inbox?.refreshToken || !email || !lead) {
         failed++;
         await storage.upsert(storage.KEYS.queue, { ...item, status: "failed" });
         setDraftProgress((p) => ({ ...p, done: ++done, failed }));
@@ -203,8 +257,13 @@ export function CampaignPage() {
       }
 
       try {
+        // Auto-refreshes if the cached access token is expired or close to
+        // it — this is what removes the need to manually reconnect an
+        // inbox before every campaign.
+        const accessToken = await getValidAccessToken(inbox);
+
         const draftId = await createOutlookDraft(
-          inbox.accessToken,
+          accessToken,
           {
             toEmail: lead.contactEmail,
             toName: lead.contactName,
@@ -352,7 +411,14 @@ export function CampaignPage() {
 
             <div className="info-box">
               <Settings size={13} />
-              <span>{activeInboxes.length} active inbox{activeInboxes.length !== 1 ? "es" : ""} ready to receive drafts</span>
+              <span>
+                {activeInboxes.length} active inbox{activeInboxes.length !== 1 ? "es" : ""} ·{" "}
+                {connectedInboxCount} currently connected
+                {connectedInboxCount < activeInboxes.length &&
+                  (lang === "fr"
+                    ? " — les autres échoueront jusqu'à ce que vous les connectiez"
+                    : " — the rest will fail until you connect them")}
+              </span>
             </div>
 
             <button

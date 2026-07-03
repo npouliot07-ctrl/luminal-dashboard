@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { Play, Pause, Send, RefreshCw, Clock } from "lucide-react";
-import type { QueueItem, Lead, Inbox, Campaign } from "../types";
+import { Play, Pause, Send, RefreshCw, Clock, RotateCw } from "lucide-react";
+import type { QueueItem, Lead, Inbox, Campaign, GeneratedEmail } from "../types";
 import { storage } from "../services/storage";
-import { sendDraft } from "../services/graphApi";
+import { sendDraft, createOutlookDraft } from "../services/graphApi";
 import { logAudit } from "../services/compliance";
 import { useLang } from "../utils/LangContext";
 import { translate } from "../utils/i18n";
@@ -88,6 +88,85 @@ export function QueuePage() {
     await refreshQueue();
   };
 
+  /**
+   * Retries a failed queue item. Two different failure modes need different handling:
+   * - The draft was already created but *sending* failed → just resend it from
+   *   the same inbox it was drafted in.
+   * - The draft was never created at all (no draftId) → this happens when the
+   *   item's assigned inbox wasn't connected (or its token had expired) at
+   *   drafting time. Retry uses that SAME originally-assigned inbox — not a
+   *   different one — so the even split you planned stays intact as you
+   *   connect inboxes one at a time. If that inbox still isn't connected,
+   *   the item just stays failed until you connect it and retry again.
+   */
+  const retryItem = async (item: QueueItem) => {
+    setSending(item.id);
+    try {
+      const freshInboxes = await storage.get<Inbox>(storage.KEYS.inboxes);
+      const inbox = freshInboxes.find((i) => i.id === item.inboxId);
+
+      if (!inbox?.accessToken) {
+        throw new Error("This item's assigned inbox isn't connected yet — connect it first, then retry.");
+      }
+
+      if (item.draftId) {
+        await sendDraft(inbox.accessToken, item.draftId);
+        await storage.upsert(storage.KEYS.queue, {
+          ...item,
+          status: "sent",
+          actualSentAt: new Date().toISOString(),
+        });
+        const lead = leadMap.get(item.leadId);
+        if (lead) await storage.upsert(storage.KEYS.leads, { ...lead, status: "sent" });
+        await logAudit("email_sent", undefined, {
+          campaignId: item.campaignId,
+          leadId: item.leadId,
+          inboxId: item.inboxId,
+        });
+      } else {
+        const emails = await storage.get<GeneratedEmail>(storage.KEYS.emails);
+        const email = emails.find((e) => e.id === item.emailId);
+        const lead = leadMap.get(item.leadId);
+        if (!email || !lead) throw new Error("Missing generated email or lead for this item");
+
+        const draftId = await createOutlookDraft(inbox.accessToken, {
+          toEmail: lead.contactEmail,
+          toName: lead.contactName,
+          subject: email.subjectLine,
+          bodyHtml: email.body,
+        });
+
+        await storage.upsert(storage.KEYS.queue, { ...item, draftId, status: "drafted" });
+        await storage.upsert(storage.KEYS.leads, { ...lead, status: "drafted" });
+        await storage.upsert(storage.KEYS.inboxes, { ...inbox, draftsToday: inbox.draftsToday + 1 });
+        await logAudit("draft_created", `Draft retried into ${inbox.emailAddress}`, {
+          campaignId: item.campaignId,
+          leadId: lead.id,
+          inboxId: inbox.id,
+        });
+      }
+    } catch (err) {
+      await storage.upsert(storage.KEYS.queue, { ...item, status: "failed" });
+      console.error("Retry failed:", err);
+    }
+    setSending(null);
+    await refreshQueue();
+    await refreshInboxes();
+  };
+
+  const [retryingAll, setRetryingAll] = useState(false);
+
+  const retryAllFailed = async () => {
+    setRetryingAll(true);
+    const failedItems = (await storage.get<QueueItem>(storage.KEYS.queue)).filter((i) => i.status === "failed");
+    // Sequential on purpose — avoids hammering Graph API, and keeps the
+    // per-inbox draftsToday counts accurate as we go.
+    for (const item of failedItems) {
+      await retryItem(item);
+    }
+    setRetryingAll(false);
+  };
+
   useEffect(() => {
     if (!autoMode) {
       if (schedulerRef.current) clearInterval(schedulerRef.current);
@@ -112,7 +191,6 @@ export function QueuePage() {
     return () => {
       if (schedulerRef.current) clearInterval(schedulerRef.current);
     };
-
   }, [autoMode]);
 
   const [filterStatus, setFilterStatus] = useState("all");
@@ -144,6 +222,14 @@ export function QueuePage() {
           <button className="btn btn-ghost btn-sm" onClick={refreshQueue}>
             <RefreshCw size={13} /> {tr("refresh")}
           </button>
+          {counts.failed > 0 && (
+            <button className="btn btn-danger btn-sm" onClick={retryAllFailed} disabled={retryingAll}>
+              <RotateCw size={13} />
+              {retryingAll
+                ? lang === "fr" ? "Nouvelle tentative…" : "Retrying…"
+                : lang === "fr" ? `Réessayer tout (${counts.failed})` : `Retry all (${counts.failed})`}
+            </button>
+          )}
           <button
             className={`btn btn-sm ${autoMode ? "btn-danger" : "btn-primary"}`}
             onClick={() => setAutoMode(!autoMode)}
@@ -257,10 +343,10 @@ export function QueuePage() {
                         {item.status === "failed" && (
                           <button
                             className="btn btn-danger btn-sm"
-                            onClick={() => sendItem(item)}
-                            disabled={sending === item.id}
+                            onClick={() => retryItem(item)}
+                            disabled={sending === item.id || retryingAll}
                           >
-                            {tr("retry")}
+                            {sending === item.id ? tr("sending") : tr("retry")}
                           </button>
                         )}
                       </td>
