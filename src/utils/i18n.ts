@@ -7,6 +7,7 @@ export const t: Record<string, Record<Lang, string>> = {
   inboxes: { en: "Inboxes", fr: "Boîtes mail" },
   sendQueue: { en: "Send Queue", fr: "File d'envoi" },
   compliance: { en: "Compliance", fr: "Conformité" },
+  analytics: { en: "Analytics", fr: "Analytique" },
 
   // Leads page
   leadsTitle: { en: "Leads", fr: "Prospects" },

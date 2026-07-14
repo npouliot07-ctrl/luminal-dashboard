@@ -28,6 +28,7 @@ export function CampaignPage() {
   const { lang } = useLang();
   const tr = (key: string) => translate(key, lang);
   const [name, setName] = useState("");
+  const [selectedCampaignId, setSelectedCampaignId] = useState<string>("new");
   const [startRow, setStartRow] = useState(1);
   const [endRow, setEndRow] = useState(50);
   const [mode, setMode] = useState<"auto" | "manual">("auto");
@@ -49,9 +50,10 @@ export function CampaignPage() {
   const [draftProgress, setDraftProgress] = useState({ done: 0, total: 0, failed: 0 });
   const [drafting, setDrafting] = useState(false);
 
-  // ── Live data: leads + inboxes ───────────────────────────────────────────
+  // ── Live data: leads + inboxes + campaigns ────────────────────────────────
   const [leads, setLeads] = useState<Lead[]>([]);
   const [inboxes, setInboxes] = useState<Inbox[]>([]);
+  const [campaignsList, setCampaignsList] = useState<Campaign[]>([]);
   const [dataLoading, setDataLoading] = useState(true);
 
   const loadLeads = useCallback(async () => {
@@ -60,22 +62,27 @@ export function CampaignPage() {
   const loadInboxes = useCallback(async () => {
     setInboxes(await storage.get<Inbox>(storage.KEYS.inboxes));
   }, []);
+  const loadCampaignsList = useCallback(async () => {
+    setCampaignsList(await storage.get<Campaign>(storage.KEYS.campaigns));
+  }, []);
 
   // Initial load + live sync (e.g. your partner imports leads or connects an inbox mid-session)
   useEffect(() => {
     (async () => {
-      await Promise.all([loadLeads(), loadInboxes()]);
+      await Promise.all([loadLeads(), loadInboxes(), loadCampaignsList()]);
       setDataLoading(false);
     })();
 
     const unsubLeads = storage.subscribe(storage.KEYS.leads, loadLeads);
     const unsubInboxes = storage.subscribe(storage.KEYS.inboxes, loadInboxes);
+    const unsubCampaigns = storage.subscribe(storage.KEYS.campaigns, loadCampaignsList);
 
     return () => {
       unsubLeads();
       unsubInboxes();
+      unsubCampaigns();
     };
-  }, [loadLeads, loadInboxes]);
+  }, [loadLeads, loadInboxes, loadCampaignsList]);
 
   const readyLeads = useMemo(() => leads.filter((l) => l.status === "new"), [leads]);
   // "Active" here means eligible for planning purposes — connection status
@@ -127,18 +134,32 @@ export function CampaignPage() {
     const { clean } = await filterSuppressedLeads(toGenerate);
     if (clean.length === 0) return;
 
-    const newCampaign: Campaign = {
-      id: nanoid(),
-      name: name || `Campaign ${new Date().toLocaleDateString()}`,
-      totalLeads: clean.length,
-      status: "draft",
-      schedulingMode: mode,
-      gapMinutes,
-      createdAt: new Date().toISOString(),
-    };
+    let activeCampaign: Campaign;
+    if (selectedCampaignId === "new") {
+      activeCampaign = {
+        id: nanoid(),
+        name: name || `Campaign ${new Date().toLocaleDateString()}`,
+        totalLeads: clean.length,
+        status: "draft",
+        schedulingMode: mode,
+        gapMinutes,
+        createdAt: new Date().toISOString(),
+      };
+      await storage.upsert(storage.KEYS.campaigns, activeCampaign);
+      await logAudit("campaign_created", activeCampaign.name, { campaignId: activeCampaign.id });
+    } else {
+      // Adding this batch to an existing campaign instead of spawning a new
+      // one — bumps its contact count rather than overwriting it.
+      const existing = campaignsList.find((c) => c.id === selectedCampaignId);
+      if (!existing) {
+        alert(lang === "fr" ? "Campagne introuvable — actualisez la page." : "Selected campaign not found — refresh the page.");
+        return;
+      }
+      activeCampaign = { ...existing, totalLeads: existing.totalLeads + clean.length };
+      await storage.upsert(storage.KEYS.campaigns, activeCampaign);
+    }
 
-    await storage.upsert(storage.KEYS.campaigns, newCampaign);
-    setCampaign(newCampaign);
+    setCampaign(activeCampaign);
     setGenerating(true);
     setGenProgress({ done: 0, total: clean.length });
 
@@ -158,7 +179,7 @@ export function CampaignPage() {
     setGenerating(false);
     setStep("preview");
     await logAudit("emails_generated", `${emails.length} emails generated`, {
-      campaignId: newCampaign.id,
+      campaignId: activeCampaign.id,
     });
 
     // Refresh local lead state so leadMap/readyLeads reflect the new "generating" status
@@ -199,12 +220,18 @@ export function CampaignPage() {
     const toggled: GeneratedEmail = { ...target, approved: !target.approved };
     await storage.upsert(storage.KEYS.emails, toggled);
     setGeneratedEmails((prev) => prev.map((e) => (e.id === emailId ? toggled : e)));
+    if (toggled.approved && campaign) {
+      await logAudit("email_approved", "1 email approved", { campaignId: campaign.id, leadId: toggled.leadId });
+    }
   };
 
   const approveAll = async () => {
     const updated = generatedEmails.map((e) => ({ ...e, approved: true }));
     await Promise.all(updated.map((e) => storage.upsert(storage.KEYS.emails, e)));
     setGeneratedEmails(updated);
+    if (campaign) {
+      await logAudit("email_approved", `${updated.length} emails approved`, { campaignId: campaign.id });
+    }
   };
 
   // ── Step 2: Create drafts ──────────────────────────────────────────────────
@@ -333,14 +360,42 @@ export function CampaignPage() {
           ) : (
           <div className="flex-col gap-4">
             <div className="field">
-              <label>{tr("campaignName")}</label>
-              <input
-                className="input"
-                placeholder={tr("campaignPlaceholder")}
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
+              <label>{lang === "fr" ? "Campagne" : "Campaign"}</label>
+              <select
+                className="select"
+                value={selectedCampaignId}
+                onChange={(e) => setSelectedCampaignId(e.target.value)}
+              >
+                <option value="new">{lang === "fr" ? "+ Nouvelle campagne" : "+ New campaign"}</option>
+                {campaignsList
+                  .slice()
+                  .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+                  .map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.totalLeads} {lang === "fr" ? "contacts" : "contacts"})
+                    </option>
+                  ))}
+              </select>
+              {selectedCampaignId !== "new" && (
+                <span className="text-muted text-sm">
+                  {lang === "fr"
+                    ? "Les nouveaux emails générés seront ajoutés à cette campagne existante."
+                    : "Newly generated emails will be added to this existing campaign."}
+                </span>
+              )}
             </div>
+
+            {selectedCampaignId === "new" && (
+              <div className="field">
+                <label>{tr("campaignName")}</label>
+                <input
+                  className="input"
+                  placeholder={tr("campaignPlaceholder")}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </div>
+            )}
 
             <div className="field">
               <label>{tr("rowRange")}</label>
@@ -593,6 +648,7 @@ export function CampaignPage() {
                 setGeneratedEmails([]);
                 setCampaign(null);
                 setName("");
+                setSelectedCampaignId("new");
               }}
             >
               {tr("newCampaign")}

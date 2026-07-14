@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from "react"
 import { Play, Pause, Send, RefreshCw, Clock, RotateCw } from "lucide-react";
 import type { QueueItem, Lead, Inbox, Campaign, GeneratedEmail } from "../types";
 import { storage } from "../services/storage";
-import { sendDraft, createOutlookDraft } from "../services/graphApi";
+import { sendDraft, createOutlookDraft, getValidAccessToken } from "../services/graphApi";
 import { logAudit } from "../services/compliance";
 import { useLang } from "../utils/LangContext";
 import { translate } from "../utils/i18n";
@@ -59,11 +59,12 @@ export function QueuePage() {
 
   const sendItem = async (item: QueueItem) => {
     const inbox = inboxMap.get(item.inboxId);
-    if (!inbox?.accessToken || !item.draftId) return;
+    if (!inbox?.refreshToken || !item.draftId) return;
 
     setSending(item.id);
     try {
-      await sendDraft(inbox.accessToken, item.draftId);
+      const accessToken = await getValidAccessToken(inbox);
+      await sendDraft(accessToken, item.draftId);
 
       const updated: QueueItem = {
         ...item,
@@ -89,6 +90,37 @@ export function QueuePage() {
   };
 
   /**
+   * Records a drafted email as sent WITHOUT calling the Graph API — for
+   * cases where the email was actually sent manually from within Outlook
+   * itself rather than through this app's Send Now button. This exists
+   * purely to keep the queue status and Analytics numbers honest; it
+   * doesn't send anything.
+   */
+  const markAsSent = async (item: QueueItem) => {
+    if (!window.confirm(
+      lang === "fr"
+        ? "Marquer cet email comme envoyé ? Utilisez ceci uniquement si vous l'avez déjà envoyé manuellement depuis Outlook."
+        : "Mark this email as sent? Only use this if you already sent it manually from Outlook."
+    )) return;
+
+    setSending(item.id);
+    const updated: QueueItem = { ...item, status: "sent", actualSentAt: new Date().toISOString() };
+    await storage.upsert(storage.KEYS.queue, updated);
+
+    const lead = leadMap.get(item.leadId);
+    if (lead) await storage.upsert(storage.KEYS.leads, { ...lead, status: "sent" });
+
+    await logAudit("email_sent", "Marked as sent manually", {
+      campaignId: item.campaignId,
+      leadId: item.leadId,
+      inboxId: item.inboxId,
+    });
+
+    setSending(null);
+    await refreshQueue();
+  };
+
+  /**
    * Retries a failed queue item. Two different failure modes need different handling:
    * - The draft was already created but *sending* failed → just resend it from
    *   the same inbox it was drafted in.
@@ -105,12 +137,14 @@ export function QueuePage() {
       const freshInboxes = await storage.get<Inbox>(storage.KEYS.inboxes);
       const inbox = freshInboxes.find((i) => i.id === item.inboxId);
 
-      if (!inbox?.accessToken) {
+      if (!inbox?.refreshToken) {
         throw new Error("This item's assigned inbox isn't connected yet — connect it first, then retry.");
       }
 
+      const accessToken = await getValidAccessToken(inbox);
+
       if (item.draftId) {
-        await sendDraft(inbox.accessToken, item.draftId);
+        await sendDraft(accessToken, item.draftId);
         await storage.upsert(storage.KEYS.queue, {
           ...item,
           status: "sent",
@@ -129,7 +163,7 @@ export function QueuePage() {
         const lead = leadMap.get(item.leadId);
         if (!email || !lead) throw new Error("Missing generated email or lead for this item");
 
-        const draftId = await createOutlookDraft(inbox.accessToken, {
+        const draftId = await createOutlookDraft(accessToken, {
           toEmail: lead.contactEmail,
           toName: lead.contactName,
           subject: email.subjectLine,
@@ -331,14 +365,24 @@ export function QueuePage() {
                       </td>
                       <td>
                         {item.status === "drafted" && (
-                          <button
-                            className="btn btn-primary btn-sm"
-                            onClick={() => sendItem(item)}
-                            disabled={sending === item.id || autoMode}
-                          >
-                            <Send size={12} />
-                            {sending === item.id ? tr("sending") : tr("sendNow")}
-                          </button>
+                          <div className="flex gap-2">
+                            <button
+                              className="btn btn-primary btn-sm"
+                              onClick={() => sendItem(item)}
+                              disabled={sending === item.id || autoMode}
+                            >
+                              <Send size={12} />
+                              {sending === item.id ? tr("sending") : tr("sendNow")}
+                            </button>
+                            <button
+                              className="btn btn-ghost btn-sm"
+                              onClick={() => markAsSent(item)}
+                              disabled={sending === item.id || autoMode}
+                              title={lang === "fr" ? "Déjà envoyé manuellement dans Outlook" : "Already sent manually in Outlook"}
+                            >
+                              {lang === "fr" ? "Marquer envoyé" : "Mark sent"}
+                            </button>
+                          </div>
                         )}
                         {item.status === "failed" && (
                           <button

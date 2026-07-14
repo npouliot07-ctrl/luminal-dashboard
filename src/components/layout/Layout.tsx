@@ -1,6 +1,6 @@
 import React from "react";
 import { Outlet, NavLink } from "react-router-dom";
-import { Users, Mail, Inbox, ListOrdered, Shield, Zap } from "lucide-react";
+import { Users, Mail, Inbox, ListOrdered, Shield, Zap, BarChart3 } from "lucide-react";
 import { useLang } from "../../utils/LangContext";
 import { translate } from "../../utils/i18n";
 import "./Layout.css";
@@ -15,6 +15,7 @@ export function Layout() {
     { to: "/inboxes", icon: Inbox, label: tr("inboxes") },
     { to: "/queue", icon: ListOrdered, label: tr("sendQueue") },
     { to: "/compliance", icon: Shield, label: tr("compliance") },
+    { to: "/analytics", icon: BarChart3, label: tr("analytics") },
   ];
 
   return (

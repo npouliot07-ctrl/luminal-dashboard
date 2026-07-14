@@ -6,6 +6,7 @@ import { CampaignPage } from "./pages/CampaignPage";
 import { InboxPage } from "./pages/InboxPage";
 import { QueuePage } from "./pages/QueuePage";
 import { CompliancePage } from "./pages/CompliancePage";
+import { AnalyticsPage } from "./pages/AnalyticsPage";
 import { LangProvider } from "./utils/LangContext";
 import { Login } from "./components/Login";
 import "./styles/global.css";
@@ -30,6 +31,7 @@ export default function App() {
             <Route path="inboxes" element={<InboxPage />} />
             <Route path="queue" element={<QueuePage />} />
             <Route path="compliance" element={<CompliancePage />} />
+            <Route path="analytics" element={<AnalyticsPage />} />
           </Route>
         </Routes>
       </BrowserRouter>
