@@ -54,6 +54,7 @@ export interface Inbox {
   addedAt: string;
   lastRampedAt: string;
   lastMailCheckedAt?: string; // cursor for incoming-mail polling
+  needsReconnect?: boolean;   // set when a token refresh fails — surfaced in the UI
 }
 
 // ─── CAMPAIGNS ───────────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { Plus, ExternalLink, Pause, Play, Trash2, RefreshCw } from "lucide-react";
+import { Plus, ExternalLink, Pause, Play, Trash2, RefreshCw, AlertCircle } from "lucide-react";
 import type { Inbox } from "../types";
 import { storage } from "../services/storage";
 import { signInInbox } from "../services/graphApi";
@@ -79,6 +79,7 @@ export function InboxPage() {
         refreshToken,
         tokenExpiresAt,
         isActive: true,
+        needsReconnect: false,
       });
       setInboxes(await storage.get<Inbox>(storage.KEYS.inboxes));
       alert(lang === "fr" ? `Connecté !` : `Connected!`);
@@ -100,6 +101,26 @@ export function InboxPage() {
           {tr("addInbox")}
         </button>
       </div>
+
+      {inboxes.some((i) => i.needsReconnect) && (
+        <div className="card mt-4" style={{ background: "rgba(248,81,73,0.08)", borderColor: "rgba(248,81,73,0.3)" }}>
+          <div className="flex gap-3 items-start">
+            <AlertCircle size={16} style={{ color: "var(--danger)", flexShrink: 0, marginTop: 1 }} />
+            <div>
+              <p style={{ color: "var(--text-primary)", fontWeight: 500, marginBottom: 4 }}>
+                {lang === "fr" ? "Reconnexion requise" : "Reconnection needed"}
+              </p>
+              <p className="text-sm text-muted">
+                {lang === "fr"
+                  ? "Ces boîtes ont un jeton qui a échoué et ne peuvent plus générer de brouillons ni vérifier les nouveaux messages tant qu'elles ne sont pas reconnectées :"
+                  : "These inboxes have a failing token and can't create drafts or check for new mail until reconnected:"}
+                {" "}
+                {inboxes.filter((i) => i.needsReconnect).map((i) => i.emailAddress).join(", ")}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showAddForm && (
         <div className="card mt-4" style={{ maxWidth: 480 }}>
@@ -169,11 +190,19 @@ export function InboxPage() {
                       <span className={`badge ${inbox.isActive ? "badge-active" : "badge-paused"}`}>
                         {inbox.isActive ? tr("active") : tr("inactive")}
                       </span>
-                      {!inbox.refreshToken && (
+                      {!inbox.refreshToken ? (
                         <span className="badge badge-failed" style={{ marginLeft: 6 }}>
                           {tr("notConnected")}
                         </span>
-                      )}
+                      ) : inbox.needsReconnect ? (
+                        <span
+                          className="badge badge-failed"
+                          style={{ marginLeft: 6 }}
+                          title={lang === "fr" ? "Le jeton de cette boîte a échoué — reconnectez-la." : "This inbox's token is failing — reconnect it."}
+                        >
+                          {lang === "fr" ? "Reconnexion requise" : "Needs reconnect"}
+                        </span>
+                      ) : null}
                     </td>
                     <td>
                       <input

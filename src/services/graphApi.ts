@@ -35,12 +35,23 @@ export function signInInbox(loginHint?: string): Promise<TokenResult> {
     const url = `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params}`;
     const popup = window.open(url, "msauth", "width=500,height=700");
 
+    let settled = false;
+    let pollTimer: number | undefined;
+    let hardTimeout: number | undefined;
+
+    const cleanup = () => {
+      window.removeEventListener("message", handler);
+      if (pollTimer) window.clearInterval(pollTimer);
+      if (hardTimeout) window.clearTimeout(hardTimeout);
+    };
+
     const handler = (event: MessageEvent) => {
       const data = event.data;
       if (!data || typeof data !== "object") return;
 
       if (data.type === "ms_auth_success") {
-        window.removeEventListener("message", handler);
+        settled = true;
+        cleanup();
         resolve({
           accessToken: data.accessToken,
           refreshToken: data.refreshToken,
@@ -48,14 +59,36 @@ export function signInInbox(loginHint?: string): Promise<TokenResult> {
         });
         popup?.close();
       } else if (data.type === "ms_auth_error") {
-        window.removeEventListener("message", handler);
+        settled = true;
+        cleanup();
         reject(new Error(data.error || "Authentication failed"));
         popup?.close();
       }
     };
 
     window.addEventListener("message", handler);
-    setTimeout(() => { window.removeEventListener("message", handler); reject(new Error("Timeout")); }, 120000);
+
+    // Detects the popup closing (whether the user cancels manually, or it
+    // finishes and closes itself) without a message ever arriving — catches
+    // edge cases the message listener alone would miss.
+    pollTimer = window.setInterval(() => {
+      if (popup?.closed && !settled) {
+        settled = true;
+        cleanup();
+        reject(new Error("Sign-in window was closed before completing."));
+      }
+    }, 500);
+
+    // Generous last-resort cap — logins involving MFA or extra verification
+    // steps can legitimately take a couple of minutes, so this only exists
+    // to prevent an indefinite hang, not to rush the user.
+    hardTimeout = window.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        cleanup();
+        reject(new Error("Timeout — sign-in took too long."));
+      }
+    }, 5 * 60 * 1000);
   });
 }
 
@@ -107,17 +140,29 @@ export async function getValidAccessToken(inbox: Inbox): Promise<string> {
     throw new Error(`${inbox.emailAddress} has never been connected — click Connect first.`);
   }
 
-  const result = await refreshAccessToken(inbox.refreshToken);
-  const tokenExpiresAt = new Date(Date.now() + result.expiresIn * 1000).toISOString();
+  try {
+    const result = await refreshAccessToken(inbox.refreshToken);
+    const tokenExpiresAt = new Date(Date.now() + result.expiresIn * 1000).toISOString();
 
-  await storage.upsert(storage.KEYS.inboxes, {
-    ...inbox,
-    accessToken: result.accessToken,
-    refreshToken: result.refreshToken || inbox.refreshToken,
-    tokenExpiresAt,
-  });
+    await storage.upsert(storage.KEYS.inboxes, {
+      ...inbox,
+      accessToken: result.accessToken,
+      refreshToken: result.refreshToken || inbox.refreshToken,
+      tokenExpiresAt,
+      needsReconnect: false,
+    });
 
-  return result.accessToken;
+    return result.accessToken;
+  } catch (err) {
+    // Most commonly this happens when the stored refresh token was issued
+    // under a different auth flow than the app currently uses (e.g. an
+    // inbox connected before the SPA → backend-mediated OAuth switch) — no
+    // automatic recovery exists for that, a real reconnect is required.
+    // Flagging it here means it shows up on the Inboxes page instead of
+    // only in console logs.
+    await storage.upsert(storage.KEYS.inboxes, { ...inbox, needsReconnect: true });
+    throw err;
+  }
 }
 
 export interface DraftPayload {
