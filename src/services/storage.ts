@@ -21,6 +21,7 @@ const KEYS = {
   queue: "queue_items",
   suppression: "suppression",
   audit: "audit_log",
+  incomingMail: "incoming_mail",
 } as const;
 
 type TableName = (typeof KEYS)[keyof typeof KEYS];

@@ -7,6 +7,7 @@ import { InboxPage } from "./pages/InboxPage";
 import { QueuePage } from "./pages/QueuePage";
 import { CompliancePage } from "./pages/CompliancePage";
 import { AnalyticsPage } from "./pages/AnalyticsPage";
+import { RepliesPage } from "./pages/RepliesPage";
 import { LangProvider } from "./utils/LangContext";
 import { Login } from "./components/Login";
 import "./styles/global.css";
@@ -32,6 +33,7 @@ export default function App() {
             <Route path="queue" element={<QueuePage />} />
             <Route path="compliance" element={<CompliancePage />} />
             <Route path="analytics" element={<AnalyticsPage />} />
+            <Route path="replies" element={<RepliesPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

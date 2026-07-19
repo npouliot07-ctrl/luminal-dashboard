@@ -53,6 +53,7 @@ export interface Inbox {
   isActive: boolean;
   addedAt: string;
   lastRampedAt: string;
+  lastMailCheckedAt?: string; // cursor for incoming-mail polling
 }
 
 // ─── CAMPAIGNS ───────────────────────────────────────────────────────────────
@@ -114,4 +115,23 @@ export interface AuditEntry {
   leadId?: string;
   campaignId?: string;
   detail?: string;
+}
+
+// ─── INCOMING MAIL ─────────────────────────────────────────────────────────────
+//
+// Read-only records of mail received in a connected inbox — fetched via the
+// Microsoft Graph API on your own account, nothing embedded in outgoing
+// emails, no effect on deliverability. Not "tracking" in the sense of open
+// pixels / link tracking / bounce webhooks — just reading your own mailbox.
+
+export interface IncomingMail {
+  id: string;              // Graph message id — naturally dedupes
+  inboxId: string;
+  fromEmail: string;
+  fromName: string;
+  subject: string;
+  preview: string;
+  receivedAt: string;
+  matchedLeadId?: string;
+  read: boolean;
 }
