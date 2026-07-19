@@ -127,42 +127,68 @@ export async function refreshAccessToken(refreshToken: string): Promise<TokenRes
  * confidential-client flow this should now only happen after ~90 days of
  * inactivity, or if access was explicitly revoked).
  */
+// De-dupes concurrent refresh attempts for the same inbox within this tab —
+// drafting, queue auto-send, and mail polling can all want a fresh token
+// for the same inbox around the same moment.
+const inflightRefreshes = new Map<string, Promise<string>>();
+
 export async function getValidAccessToken(inbox: Inbox): Promise<string> {
+  // Always work from the freshest record in the database rather than
+  // whatever possibly-stale copy the caller has in local state. This
+  // matters a lot with two people using the app: if both tabs think a
+  // refresh is needed based on stale local data, both independently call
+  // Microsoft's refresh endpoint around the same time — and since Microsoft
+  // rotates the refresh token on every use, whichever save lands last wins,
+  // silently invalidating the other tab's copy. Reading fresh first means
+  // a tab that already sees a just-refreshed token from the other session
+  // simply reuses it instead of triggering a redundant, racy refresh.
+  const all = await storage.get<Inbox>(storage.KEYS.inboxes);
+  const fresh = all.find((i) => i.id === inbox.id) || inbox;
+
   const now = Date.now();
-  const expiresAt = inbox.tokenExpiresAt ? new Date(inbox.tokenExpiresAt).getTime() : 0;
+  const expiresAt = fresh.tokenExpiresAt ? new Date(fresh.tokenExpiresAt).getTime() : 0;
   const REFRESH_BUFFER_MS = 5 * 60 * 1000; // refresh 5 min before actual expiry
 
-  if (inbox.accessToken && expiresAt - REFRESH_BUFFER_MS > now) {
-    return inbox.accessToken; // still valid, no network call needed
+  if (fresh.accessToken && expiresAt - REFRESH_BUFFER_MS > now) {
+    return fresh.accessToken; // still valid, no network call needed
   }
 
-  if (!inbox.refreshToken) {
-    throw new Error(`${inbox.emailAddress} has never been connected — click Connect first.`);
+  if (!fresh.refreshToken) {
+    throw new Error(`${fresh.emailAddress} has never been connected — click Connect first.`);
   }
 
-  try {
-    const result = await refreshAccessToken(inbox.refreshToken);
-    const tokenExpiresAt = new Date(Date.now() + result.expiresIn * 1000).toISOString();
+  const existing = inflightRefreshes.get(fresh.id);
+  if (existing) return existing;
 
-    await storage.upsert(storage.KEYS.inboxes, {
-      ...inbox,
-      accessToken: result.accessToken,
-      refreshToken: result.refreshToken || inbox.refreshToken,
-      tokenExpiresAt,
-      needsReconnect: false,
-    });
+  const refreshPromise = (async () => {
+    try {
+      const result = await refreshAccessToken(fresh.refreshToken!);
+      const tokenExpiresAt = new Date(Date.now() + result.expiresIn * 1000).toISOString();
 
-    return result.accessToken;
-  } catch (err) {
-    // Most commonly this happens when the stored refresh token was issued
-    // under a different auth flow than the app currently uses (e.g. an
-    // inbox connected before the SPA → backend-mediated OAuth switch) — no
-    // automatic recovery exists for that, a real reconnect is required.
-    // Flagging it here means it shows up on the Inboxes page instead of
-    // only in console logs.
-    await storage.upsert(storage.KEYS.inboxes, { ...inbox, needsReconnect: true });
-    throw err;
-  }
+      await storage.upsert(storage.KEYS.inboxes, {
+        ...fresh,
+        accessToken: result.accessToken,
+        refreshToken: result.refreshToken || fresh.refreshToken,
+        tokenExpiresAt,
+        needsReconnect: false,
+      });
+
+      return result.accessToken;
+    } catch (err) {
+      // Most commonly this happens when the stored refresh token was issued
+      // under a different auth flow than the app currently uses (e.g. an
+      // inbox connected before the SPA → backend-mediated OAuth switch), or
+      // — now mitigated by the above, but not 100% impossible — a losing
+      // race between two sessions refreshing the same inbox at once.
+      await storage.upsert(storage.KEYS.inboxes, { ...fresh, needsReconnect: true });
+      throw err;
+    } finally {
+      inflightRefreshes.delete(fresh.id);
+    }
+  })();
+
+  inflightRefreshes.set(fresh.id, refreshPromise);
+  return refreshPromise;
 }
 
 export interface DraftPayload {

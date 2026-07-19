@@ -50,7 +50,7 @@ export function Layout() {
     runMailCheck();
     refreshUnreadCount();
 
-    pollRef.current = setInterval(runMailCheck, 60_000);
+    pollRef.current = setInterval(runMailCheck, 55_000 + Math.random() * 10_000);
     const unsub = storage.subscribe(storage.KEYS.incomingMail, refreshUnreadCount);
 
     return () => {
