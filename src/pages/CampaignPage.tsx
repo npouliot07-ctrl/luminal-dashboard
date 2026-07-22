@@ -155,7 +155,16 @@ export function CampaignPage() {
         alert(lang === "fr" ? "Campagne introuvable — actualisez la page." : "Selected campaign not found — refresh the page.");
         return;
       }
-      activeCampaign = { ...existing, totalLeads: existing.totalLeads + clean.length };
+      activeCampaign = {
+        ...existing,
+        totalLeads: existing.totalLeads + clean.length,
+        // Whatever's currently selected in the form should always apply to
+        // this batch — previously this silently kept the campaign's
+        // original scheduling mode/gap from whenever it was first created,
+        // ignoring the dropdowns on screen.
+        schedulingMode: mode,
+        gapMinutes,
+      };
       await storage.upsert(storage.KEYS.campaigns, activeCampaign);
     }
 
