@@ -50,7 +50,10 @@ export function Layout() {
     runMailCheck();
     refreshUnreadCount();
 
-    pollRef.current = setInterval(runMailCheck, 55_000 + Math.random() * 10_000);
+    // Checking once an hour is a much more human-like cadence, and further
+    // reduces the automated API call volume that likely contributed to the
+    // earlier abuse-mode flag.
+    pollRef.current = setInterval(runMailCheck, 60 * 60_000 + Math.random() * 5 * 60_000);
     const unsub = storage.subscribe(storage.KEYS.incomingMail, refreshUnreadCount);
 
     return () => {
